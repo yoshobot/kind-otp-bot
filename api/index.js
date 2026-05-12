@@ -29,15 +29,30 @@ export default async function handler(req, res) {
     await fetch(`${FIREBASE_URL}/${path}.json`, { method: "DELETE" });
   };
 
+  // --- INI YANG BARU: ALARM 8 DETIK ---
   const fastbitApi = async (endpoint) => {
-    const response = await fetch(`https://fastbit.co.id/api${endpoint}`, {
-      headers: { "X-API-KEY": FASTBIT_API_KEY }
-    });
-    const textData = await response.text();
+    const controller = new AbortController();
+    const timeoutId = setTimeout(() => controller.abort(), 8000); // Batas 8 detik
+
     try {
-      return JSON.parse(textData);
-    } catch (e) {
-      throw new Error(`Respon Fastbit bukan JSON! Isinya: ${textData.substring(0, 50)}...`);
+      const response = await fetch(`https://fastbit.co.id/api${endpoint}`, {
+        headers: { "X-API-KEY": FASTBIT_API_KEY },
+        signal: controller.signal
+      });
+      clearTimeout(timeoutId);
+      
+      const textData = await response.text();
+      try {
+        return JSON.parse(textData);
+      } catch (e) {
+        throw new Error(`Respon Fastbit bukan JSON! Isinya: ${textData.substring(0, 50)}...`);
+      }
+    } catch (error) {
+      clearTimeout(timeoutId);
+      if (error.name === 'AbortError') {
+        throw new Error("TIMEOUT: Server Fastbit tidak merespons atau memblokir Vercel (Lebih dari 8 Detik).");
+      }
+      throw error;
     }
   };
 
@@ -67,6 +82,25 @@ export default async function handler(req, res) {
           parse_mode: "HTML",
           reply_markup: keyboard
         });
+        return res.status(200).send('OK');
+      }
+
+      if (text.startsWith("/cari ")) {
+        const keyword = text.split("/cari ")[1].toLowerCase();
+        await sendTelegram("sendMessage", { chat_id: chatId, text: `⏳ Mencari ID aplikasi untuk: <b>${keyword}</b>...`, parse_mode: "HTML" });
+        
+        const fbServices = await fastbitApi("/services");
+        if (fbServices.status === "success" && Array.isArray(fbServices.data)) {
+          const found = fbServices.data.filter(s => s.text.toLowerCase().includes(keyword)).slice(0, 10);
+          
+          if (found.length > 0) {
+            let msg = `🔎 <b>Hasil Pencarian Fastbit:</b>\n\n`;
+            found.forEach(f => { msg += `ID: <code>${f.id}</code> - Nama: ${f.text}\n` });
+            await sendTelegram("sendMessage", { chat_id: chatId, text: msg, parse_mode: "HTML" });
+          } else {
+            await sendTelegram("sendMessage", { chat_id: chatId, text: `❌ Aplikasi "${keyword}" tidak ditemukan.` });
+          }
+        }
         return res.status(200).send('OK');
       }
     }
@@ -121,7 +155,6 @@ export default async function handler(req, res) {
         });
       }
 
-      // --- RENCANA B: DAFTAR APLIKASI FAVORIT ---
       if (data === "menu_beli") {
         const activeOrder = await dbGet(`active_orders/${chatId}`);
         if (activeOrder) {
@@ -134,12 +167,11 @@ export default async function handler(req, res) {
           return res.status(200).send('OK');
         }
 
-        // DATABASE ID APLIKASI FASTBIT
         const layananFavorit = [
-          { id: "1213", name: "WhatsApp" }, // <-- Menggunakan asumsi ID 1213 dari dokumen Fastbit!
-          { id: "1224", name: "Telegram" }, // <-- Ini tebakan, tolong cari ID aslinya di browser nanti!
-          { id: "786", name: "Instagram" }, // Sesuai dokumentasi
-          { id: "544", name: "Facebook" }   // Sesuai dokumentasi
+          { id: "1213", name: "WhatsApp" }, 
+          { id: "1224", name: "Telegram" }, 
+          { id: "786", name: "Instagram" }, 
+          { id: "544", name: "Facebook" }   
         ];
 
         const rows = layananFavorit.map(item => {
@@ -156,7 +188,6 @@ export default async function handler(req, res) {
         });
       }
 
-      // --- MENCARI NEGARA (SESUAI GAMBAR 2: Get Countries) ---
       if (data.startsWith("list_country_")) {
         const parts = data.split("_");
         const appId = parts[2];
@@ -164,7 +195,6 @@ export default async function handler(req, res) {
         
         await sendTelegram("sendMessage", { chat_id: chatId, text: `⏳ Mencari negara & harga untuk ${appName}...` });
 
-        // Tembak endpoint Get Countries
         const fbCountries = await fastbitApi(`/services/countries?application_id=${appId}`);
         
         if (fbCountries.status === "success" && Array.isArray(fbCountries.countries)) {
@@ -178,7 +208,7 @@ export default async function handler(req, res) {
           const rows = availableCountries.map(c => {
             return [{ 
               text: `${c.name} (${c.price_formatted}) - Stok: ${c.stock}`, 
-              callback_data: `buy_${c.id}_${c.price}_${appName}` // c.id di sini adalah otp_service_id!
+              callback_data: `buy_${c.id}_${c.price}_${appName}` 
             }];
           });
 
@@ -190,12 +220,9 @@ export default async function handler(req, res) {
             parse_mode: "HTML",
             reply_markup: { inline_keyboard: rows }
           });
-        } else {
-          await sendTelegram("sendMessage", { chat_id: chatId, text: `❌ Gagal mengambil data negara. (Mungkin ID Aplikasi ${appId} salah/tidak valid di server Fastbit).` });
         }
       }
 
-      // --- EKSEKUSI PEMBELIAN (SESUAI GAMBAR 5: Generate Order) ---
       if (data.startsWith("buy_")) {
         const parts = data.split("_");
         const otpServiceId = parts[1]; 
@@ -243,7 +270,6 @@ export default async function handler(req, res) {
         }
       }
 
-      // --- CEK OTP MASUK (SESUAI GAMBAR 6: Get Order Details) ---
       if (data === "cek_pesanan") {
         const activeOrder = await dbGet(`active_orders/${chatId}`);
         if (!activeOrder) {
@@ -259,7 +285,6 @@ export default async function handler(req, res) {
            if (smsList && smsList.length > 0) {
              const kodeOtp = smsList[0]; 
              
-             // SESUAI GAMBAR 8: Finish Order
              await fastbitApi(`/virtual-number/orders/${activeOrder.order_uuid}/finish`);
              await dbDelete(`active_orders/${chatId}`);
 
@@ -271,12 +296,9 @@ export default async function handler(req, res) {
            } else {
              await sendTelegram("sendMessage", { chat_id: chatId, text: "⏳ Belum ada SMS/OTP yang masuk. Tunggu beberapa detik lalu klik cek lagi." });
            }
-        } else {
-           await sendTelegram("sendMessage", { chat_id: chatId, text: "⏳ Sedang memproses ke server Fastbit, silahkan klik cek lagi..." });
         }
       }
 
-      // --- BATALKAN PESANAN (SESUAI GAMBAR 7: Cancel Order) ---
       if (data === "batal_pesanan") {
         const activeOrder = await dbGet(`active_orders/${chatId}`);
         if (!activeOrder) {
