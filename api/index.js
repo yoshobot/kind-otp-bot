@@ -29,25 +29,28 @@ export default async function handler(req, res) {
     await fetch(`${FIREBASE_URL}/${path}.json`, { method: "DELETE" });
   };
 
-  // VERSI ANTI CRASH FASTBIT
   const fastbitApi = async (endpoint) => {
     const response = await fetch(`https://fastbit.co.id/api${endpoint}`, {
       headers: { "X-API-KEY": FASTBIT_API_KEY }
     });
-    const textData = await response.text(); // Baca sebagai teks dulu
+    const textData = await response.text();
     try {
-      return JSON.parse(textData); // Coba ubah ke JSON
+      return JSON.parse(textData);
     } catch (e) {
       throw new Error(`Respon Fastbit bukan JSON! Isinya: ${textData.substring(0, 50)}...`);
     }
   };
 
   try {
+    // ==========================================
+    // 1. PENANGANAN PESAN TEKS (COMMAND)
+    // ==========================================
     if (body.message && body.message.text) {
       const chatId = body.message.chat.id;
       const text = body.message.text;
       const username = body.message.chat.username || body.message.chat.first_name || "User";
 
+      // --- MENU UTAMA ---
       if (text === "/start") {
         let user = await dbGet(`users/${chatId}`);
         if (!user) {
@@ -68,9 +71,36 @@ export default async function handler(req, res) {
           parse_mode: "HTML",
           reply_markup: keyboard
         });
+        return res.status(200).send('OK');
+      }
+
+      // --- FITUR RAHASIA ADMIN: CARI ID APLIKASI ---
+      if (text.startsWith("/cari ")) {
+        const keyword = text.split("/cari ")[1].toLowerCase();
+        await sendTelegram("sendMessage", { chat_id: chatId, text: `⏳ Mencari ID aplikasi untuk: <b>${keyword}</b>...`, parse_mode: "HTML" });
+        
+        const fbServices = await fastbitApi("/services");
+        if (fbServices.status === "success" && Array.isArray(fbServices.data)) {
+          const found = fbServices.data.filter(s => s.text.toLowerCase().includes(keyword)).slice(0, 10);
+          
+          if (found.length > 0) {
+            let msg = `🔎 <b>Hasil Pencarian Fastbit:</b>\n\n`;
+            found.forEach(f => { msg += `ID: <code>${f.id}</code> - Nama: ${f.text}\n` });
+            msg += `\n<i>Copy ID di atas dan masukkan ke dalam kode index.js kamu.</i>`;
+            await sendTelegram("sendMessage", { chat_id: chatId, text: msg, parse_mode: "HTML" });
+          } else {
+            await sendTelegram("sendMessage", { chat_id: chatId, text: `❌ Aplikasi "${keyword}" tidak ditemukan di Fastbit.` });
+          }
+        } else {
+          await sendTelegram("sendMessage", { chat_id: chatId, text: "❌ Gagal koneksi ke database Fastbit." });
+        }
+        return res.status(200).send('OK');
       }
     }
 
+    // ==========================================
+    // 2. PENANGANAN TOMBOL (CALLBACK QUERY)
+    // ==========================================
     if (body.callback_query) {
       const chatId = body.callback_query.message.chat.id;
       const messageId = body.callback_query.message.message_id;
@@ -84,8 +114,6 @@ export default async function handler(req, res) {
         user = { username: "User", saldo: 0 };
         await dbPut(`users/${chatId}`, user);
       }
-      
-      // Amankan jika saldo error / belum ada
       const userSaldo = Number(user.saldo) || 0;
 
       if (data === "menu_profil") {
@@ -102,7 +130,7 @@ export default async function handler(req, res) {
         await sendTelegram("editMessageText", {
           chat_id: chatId,
           message_id: messageId,
-          text: `<b>💰 ISI SALDO</b>\n\nUntuk mengisi saldo, silakan hubungi Admin di @yoshuayoss\n\n<i>Sistem otomatis deposit QRIS sedang dalam pengembangan.</i>`,
+          text: `<b>💰 ISI SALDO</b>\n\nUntuk mengisi saldo, silakan hubungi Admin di @KontakAdminZione\n\n<i>Sistem otomatis deposit QRIS sedang dalam pengembangan.</i>`,
           parse_mode: "HTML",
           reply_markup: { inline_keyboard: [[{ text: "🔙 Kembali", callback_data: "menu_utama" }]] }
         });
@@ -123,6 +151,7 @@ export default async function handler(req, res) {
         });
       }
 
+      // --- RENCANA B: MENU LAYANAN INSTAN (ANTI LEMOT & TIMEOUT) ---
       if (data === "menu_beli") {
         const activeOrder = await dbGet(`active_orders/${chatId}`);
         if (activeOrder) {
@@ -135,29 +164,26 @@ export default async function handler(req, res) {
           return res.status(200).send('OK');
         }
 
-        await sendTelegram("sendMessage", { chat_id: chatId, text: "⏳ Mengambil daftar layanan dari server..." });
+        // KUMPULAN LAYANAN FAVORIT (Bisa kamu edit ID-nya nanti)
+        const layananFavorit = [
+          { id: "100", name: "WhatsApp" }, // <-- Ganti 100 dengan ID Asli WA
+          { id: "101", name: "Telegram" }, // <-- Ganti 101 dengan ID Asli TG
+          { id: "786", name: "Instagram" }, // Ini ID asli dari screenshot kamu
+          { id: "544", name: "Facebook" }   // Ini ID asli dari screenshot kamu
+        ];
 
-        const fbServices = await fastbitApi("/services");
-        
-        if (fbServices.status === "success" && Array.isArray(fbServices.data)) {
-          const listLayanan = fbServices.data.slice(0, 15); 
-          
-          const rows = listLayanan.map(item => {
-            const safeName = item.text.substring(0, 15);
-            return [{ text: `${item.text}`, callback_data: `list_country_${item.id}_${safeName}` }];
-          });
+        const rows = layananFavorit.map(item => {
+          return [{ text: item.name, callback_data: `list_country_${item.id}_${item.name}` }];
+        });
+        rows.push([{ text: "🔙 Kembali", callback_data: "menu_utama" }]);
 
-          rows.push([{ text: "🔙 Kembali", callback_data: "menu_utama" }]);
-
-          await sendTelegram("sendMessage", {
-            chat_id: chatId,
-            text: `<b>🛒 PILIH APLIKASI</b>\n\nSaldo Anda: Rp ${userSaldo.toLocaleString("id-ID")}\nPilih aplikasi yang diinginkan:`,
-            parse_mode: "HTML",
-            reply_markup: { inline_keyboard: rows }
-          });
-        } else {
-          await sendTelegram("sendMessage", { chat_id: chatId, text: `❌ Gagal mengambil daftar layanan. Status API: ${fbServices.status || "Unknown"}` });
-        }
+        await sendTelegram("editMessageText", {
+          chat_id: chatId,
+          message_id: messageId,
+          text: `<b>🛒 PILIH APLIKASI</b>\n\nSaldo Anda: Rp ${userSaldo.toLocaleString("id-ID")}\nPilih aplikasi yang ingin dibeli:`,
+          parse_mode: "HTML",
+          reply_markup: { inline_keyboard: rows }
+        });
       }
 
       if (data.startsWith("list_country_")) {
@@ -165,7 +191,7 @@ export default async function handler(req, res) {
         const appId = parts[2];
         const appName = parts[3];
         
-        await sendTelegram("sendMessage", { chat_id: chatId, text: `⏳ Mencari ketersediaan negara untuk ${appName}...` });
+        await sendTelegram("sendMessage", { chat_id: chatId, text: `⏳ Mencari negara dan harga untuk ${appName}...` });
 
         const fbCountries = await fastbitApi(`/services/countries?application_id=${appId}`);
         
@@ -173,7 +199,7 @@ export default async function handler(req, res) {
           const availableCountries = fbCountries.countries.filter(c => Number(c.stock) > 0).slice(0, 10);
 
           if (availableCountries.length === 0) {
-            await sendTelegram("sendMessage", { chat_id: chatId, text: `❌ Maaf, stok nomor untuk aplikasi ${appName} sedang kosong di semua negara.` });
+            await sendTelegram("sendMessage", { chat_id: chatId, text: `❌ Maaf, stok nomor ${appName} sedang kosong di semua negara.` });
             return res.status(200).send('OK');
           }
 
@@ -193,7 +219,7 @@ export default async function handler(req, res) {
             reply_markup: { inline_keyboard: rows }
           });
         } else {
-          await sendTelegram("sendMessage", { chat_id: chatId, text: "❌ Gagal mengambil data negara." });
+          await sendTelegram("sendMessage", { chat_id: chatId, text: `❌ Gagal mengambil data negara atau ID Aplikasi salah.` });
         }
       }
 
@@ -296,13 +322,11 @@ export default async function handler(req, res) {
 
   } catch (error) {
     console.error("Error Sistem:", error);
-    
-    // --- FITUR BUG TRACKER (Kirim laporan error langsung ke Telegram) ---
     const targetChatId = body?.callback_query?.message?.chat?.id || body?.message?.chat?.id;
     if (targetChatId) {
       await sendTelegram("sendMessage", { 
         chat_id: targetChatId, 
-        text: `🚨 <b>SISTEM CRASH DETECTED!</b>\n\nPesan Error:\n<code>${error.message}</code>\n\nLaporkan ini ke Developer.`, 
+        text: `🚨 <b>SISTEM CRASH DETECTED!</b>\n\nPesan Error:\n<code>${error.message}</code>`, 
         parse_mode: "HTML" 
       });
     }
