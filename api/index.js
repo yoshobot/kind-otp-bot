@@ -4,12 +4,13 @@ export default async function handler(req, res) {
 
   const { body } = req;
   const TELEGRAM_TOKEN = process.env.TELEGRAM_TOKEN;
-  const FASTBIT_API_KEY = process.env.FASTBIT_API_KEY; // "5HxiNMjDTaXfbxtbK60IBx6eEe22RHV1"
-  
-  // URL Firebase Kamu
-  const FIREBASE_URL = "https://db-kind-otp-default-rtdb.asia-southeast1.firebasedatabase.app";
+  const FASTBIT_API_KEY = process.env.FASTBIT_API_KEY; 
+  // Gunakan ENV jika ada, jika tidak gunakan fallback link ini
+  const FIREBASE_URL = process.env.FIREBASE_URL || "https://db-kind-otp-default-rtdb.asia-southeast1.firebasedatabase.app";
 
-  // Fungsi Helper Telegram
+  // ==========================================
+  // FUNGSI HELPER
+  // ==========================================
   const sendTelegram = async (method, data) => {
     return fetch(`https://api.telegram.org/bot${TELEGRAM_TOKEN}/${method}`, {
       method: "POST",
@@ -18,11 +19,11 @@ export default async function handler(req, res) {
     });
   };
 
-  // Fungsi Helper Firebase
   const dbGet = async (path) => {
-    const res = await fetch(`${FIREBASE_URL}/${path}.json`);
-    return res.json();
+    const response = await fetch(`${FIREBASE_URL}/${path}.json`);
+    return response.json();
   };
+
   const dbPut = async (path, data) => {
     await fetch(`${FIREBASE_URL}/${path}.json`, {
       method: "PUT",
@@ -30,16 +31,16 @@ export default async function handler(req, res) {
       body: JSON.stringify(data)
     });
   };
+
   const dbDelete = async (path) => {
     await fetch(`${FIREBASE_URL}/${path}.json`, { method: "DELETE" });
   };
 
-  // Fungsi Helper Fastbit
   const fastbitApi = async (endpoint) => {
-    const res = await fetch(`https://fastbit.co.id/api${endpoint}`, {
+    const response = await fetch(`https://fastbit.co.id/api${endpoint}`, {
       headers: { "X-API-KEY": FASTBIT_API_KEY }
     });
-    return res.json();
+    return response.json();
   };
 
   try {
@@ -52,7 +53,7 @@ export default async function handler(req, res) {
       const username = body.message.chat.username || body.message.chat.first_name || "User";
 
       if (text === "/start") {
-        // Cek user di database
+        // Cek/Buat Data User di Database
         let user = await dbGet(`users/${chatId}`);
         if (!user) {
           user = { username: username, saldo: 0 };
@@ -84,10 +85,15 @@ export default async function handler(req, res) {
       const data = body.callback_query.data;
       const callbackId = body.callback_query.id;
 
-      // Jawab callback agar loading tombol hilang
+      // Jawab callback agar loading di tombol Telegram hilang
       await sendTelegram("answerCallbackQuery", { callback_query_id: callbackId });
 
+      // Ambil data user terkini
       let user = await dbGet(`users/${chatId}`);
+      if (!user) {
+        user = { username: "User", saldo: 0 };
+        await dbPut(`users/${chatId}`, user);
+      }
 
       // --- MENU PROFIL ---
       if (data === "menu_profil") {
@@ -127,60 +133,111 @@ export default async function handler(req, res) {
         });
       }
 
-      // --- MENU BELI NOMOR ---
+      // --- MENU BELI (AMBIL LAYANAN DARI FASTBIT) ---
       if (data === "menu_beli") {
         const activeOrder = await dbGet(`active_orders/${chatId}`);
         if (activeOrder) {
-          return sendTelegram("sendMessage", {
+          await sendTelegram("sendMessage", {
             chat_id: chatId,
             text: "⚠️ <b>Kamu masih memiliki pesanan aktif!</b>\nSilakan selesaikan atau batalkan pesanan sebelumnya.",
             parse_mode: "HTML",
             reply_markup: { inline_keyboard: [[{ text: "Cek Pesanan Aktif", callback_data: "cek_pesanan" }]] }
           });
+          return res.status(200).send('OK');
         }
 
-        // Tampilkan List Layanan (Contoh: ID Fastbit & Harga di-hardcode untuk keamanan performa)
-        // Format callback: buy_IDLAYANAN_HARGA_NAMALAYANAN
-        const layananKeyboard = {
-          inline_keyboard: [
-            [{ text: "WhatsApp (Rp 3.500)", callback_data: "buy_139382_3500_WhatsApp" }], // Ganti 139382 dengan ID asli WA Fastbit
-            [{ text: "Telegram (Rp 2.500)", callback_data: "buy_12345_2500_Telegram" }], // Ganti ID
-            [{ text: "🔙 Kembali", callback_data: "menu_utama" }]
-          ]
-        };
+        // Tampilkan pesan loading sementara
+        await sendTelegram("sendMessage", { chat_id: chatId, text: "⏳ Mengambil daftar layanan dari server..." });
 
-        await sendTelegram("editMessageText", {
-          chat_id: chatId,
-          message_id: messageId,
-          text: `<b>🛒 BELI NOMOR OTP (INDONESIA)</b>\n\nSaldo Anda: Rp ${user.saldo.toLocaleString("id-ID")}\nPilih layanan aplikasi yang ingin dibeli:`,
-          parse_mode: "HTML",
-          reply_markup: layananKeyboard
-        });
+        const fbServices = await fastbitApi("/services");
+        
+        if (fbServices.status === "success") {
+          // Ambil 15 layanan populer teratas agar tidak error (limit tombol Telegram)
+          const listLayanan = fbServices.data.slice(0, 15); 
+          
+          const rows = listLayanan.map(item => {
+            // Membatasi panjang nama aplikasi untuk callback data agar tidak melebihi 64 bytes
+            const safeName = item.text.substring(0, 15);
+            return [{ text: `${item.text}`, callback_data: `list_country_${item.id}_${safeName}` }];
+          });
+
+          rows.push([{ text: "🔙 Kembali", callback_data: "menu_utama" }]);
+
+          await sendTelegram("sendMessage", {
+            chat_id: chatId,
+            text: `<b>🛒 PILIH APLIKASI</b>\n\nSaldo Anda: Rp ${user.saldo.toLocaleString("id-ID")}\nPilih aplikasi yang diinginkan:`,
+            parse_mode: "HTML",
+            reply_markup: { inline_keyboard: rows }
+          });
+        } else {
+          await sendTelegram("sendMessage", { chat_id: chatId, text: "❌ Gagal mengambil daftar layanan. Coba lagi nanti." });
+        }
       }
 
-      // --- PROSES PEMBELIAN (ORDER KE FASTBIT) ---
+      // --- MENU PILIH NEGARA ---
+      if (data.startsWith("list_country_")) {
+        const parts = data.split("_");
+        const appId = parts[2];
+        const appName = parts[3];
+        
+        await sendTelegram("sendMessage", { chat_id: chatId, text: `⏳ Mencari ketersediaan negara untuk ${appName}...` });
+
+        const fbCountries = await fastbitApi(`/services/countries?application_id=${appId}`);
+        
+        if (fbCountries.status === "success") {
+          // Ambil 10 negara teratas yang punya stok
+          const availableCountries = fbCountries.countries.filter(c => c.stock > 0).slice(0, 10);
+
+          if (availableCountries.length === 0) {
+            await sendTelegram("sendMessage", { chat_id: chatId, text: `❌ Maaf, stok nomor untuk aplikasi ${appName} sedang kosong di semua negara.` });
+            return res.status(200).send('OK');
+          }
+
+          const rows = availableCountries.map(c => {
+            return [{ 
+              text: `${c.name} (${c.price_formatted}) - Stok: ${c.stock}`, 
+              callback_data: `buy_${c.id}_${c.price}_${appName}` 
+            }];
+          });
+
+          rows.push([{ text: "🔙 Ganti Aplikasi", callback_data: "menu_beli" }]);
+
+          await sendTelegram("sendMessage", {
+            chat_id: chatId,
+            text: `<b>🌍 PILIH NEGARA (${appName})</b>\n\nSilakan pilih negara penyedia nomor:`,
+            parse_mode: "HTML",
+            reply_markup: { inline_keyboard: rows }
+          });
+        } else {
+          await sendTelegram("sendMessage", { chat_id: chatId, text: "❌ Gagal mengambil data negara." });
+        }
+      }
+
+      // --- EKSEKUSI PEMBELIAN (ORDER KE FASTBIT) ---
       if (data.startsWith("buy_")) {
-        const [_, serviceId, priceStr, serviceName] = data.split("_");
-        const price = parseInt(priceStr);
+        const parts = data.split("_");
+        const serviceId = parts[1]; // Ini adalah otp_service_id
+        const price = parseInt(parts[2]);
+        const serviceName = parts[3];
 
         if (user.saldo < price) {
-          return sendTelegram("sendMessage", { chat_id: chatId, text: "❌ Saldo kamu tidak mencukupi untuk membeli layanan ini." });
+          await sendTelegram("sendMessage", { chat_id: chatId, text: "❌ Saldo kamu tidak mencukupi untuk membeli layanan ini." });
+          return res.status(200).send('OK');
         }
 
-        await sendTelegram("sendMessage", { chat_id: chatId, text: "⏳ Sedang memproses pesanan ke server..." });
+        await sendTelegram("sendMessage", { chat_id: chatId, text: "⏳ Memproses pembelian nomor ke Fastbit..." });
 
-        // Request ke Fastbit
         const fbRes = await fastbitApi(`/virtual-number/generate-order-v2?otp_service_id=${serviceId}&quantity=1`);
         
         if (fbRes.success) {
           const orderUuid = fbRes.data.results[0].order_uuid;
-          const number = fbRes.data.results[0].number || "Menunggu Nomor..."; // Sesuaikan jika nomor lgsg muncul
+          const number = fbRes.data.results[0].number || "Menunggu Nomor..."; 
 
           // Potong Saldo User
           user.saldo -= price;
           await dbPut(`users/${chatId}`, user);
 
-          // Simpan ke pesanan aktif
+          // Simpan ke database (pesanan aktif)
           await dbPut(`active_orders/${chatId}`, {
             order_uuid: orderUuid,
             service_name: serviceName,
@@ -197,7 +254,7 @@ export default async function handler(req, res) {
 
           await sendTelegram("sendMessage", {
             chat_id: chatId,
-            text: `✅ <b>PESANAN BERHASIL</b>\n\nLayanan: ${serviceName}\nNomor HP: <code>${number}</code>\n\n<i>Klik nomor di atas untuk menyalin. Setelah OTP masuk, segera klik Cek Pesan.</i>`,
+            text: `✅ <b>PESANAN BERHASIL</b>\n\nLayanan: ${serviceName}\nNomor HP: <code>${number}</code>\n\n<i>Klik nomor di atas untuk menyalin. Setelah OTP masuk ke nomor tersebut, segera klik tombol Cek Pesan.</i>`,
             parse_mode: "HTML",
             reply_markup: orderMarkup
           });
@@ -206,62 +263,68 @@ export default async function handler(req, res) {
         }
       }
 
-      // --- CEK OTP (MENARIK SMS DARI FASTBIT) ---
+      // --- CEK OTP MASUK ---
       if (data === "cek_pesanan") {
         const activeOrder = await dbGet(`active_orders/${chatId}`);
-        if (!activeOrder) return sendTelegram("sendMessage", { chat_id: chatId, text: "Tidak ada pesanan aktif." });
+        if (!activeOrder) {
+          await sendTelegram("sendMessage", { chat_id: chatId, text: "Tidak ada pesanan aktif yang sedang berjalan." });
+          return res.status(200).send('OK');
+        }
 
         const fbRes = await fastbitApi(`/virtual-number/orders/${activeOrder.order_uuid}`);
 
         if (fbRes.success && fbRes.data) {
-           const smsList = fbRes.data.sms; // Menyesuaikan array SMS Fastbit
+           const smsList = fbRes.data.sms; 
            
            if (smsList && smsList.length > 0) {
-             const kodeOtp = smsList[0]; // Ambil SMS pertama
+             const kodeOtp = smsList[0]; 
              
-             // Panggil endpoint finish
+             // Kirim status "Selesai" ke Fastbit
              await fastbitApi(`/virtual-number/orders/${activeOrder.order_uuid}/finish`);
              
-             // Hapus dari active_orders
+             // Hapus dari database antrean
              await dbDelete(`active_orders/${chatId}`);
 
              await sendTelegram("sendMessage", {
                chat_id: chatId,
-               text: `🔔 <b>KODE OTP MASUK!</b>\n\nLayanan: ${activeOrder.service_name}\nNomor: <code>${fbRes.data.formatted_number || fbRes.data.number}</code>\nPesan/Kode: \n\n<code>${kodeOtp}</code>\n\n<i>Transaksi selesai. Terima kasih!</i>`,
+               text: `🔔 <b>KODE OTP MASUK!</b>\n\nLayanan: ${activeOrder.service_name}\nNomor: <code>${fbRes.data.formatted_number || fbRes.data.number}</code>\nPesan/Kode:\n\n<code>${kodeOtp}</code>\n\n<i>Transaksi selesai. Terima kasih!</i>`,
                parse_mode: "HTML"
              });
            } else {
-             await sendTelegram("sendMessage", { chat_id: chatId, text: "⏳ Belum ada SMS/OTP yang masuk. Silakan tunggu beberapa detik dan klik cek lagi." });
+             await sendTelegram("sendMessage", { chat_id: chatId, text: "⏳ Belum ada SMS/OTP yang masuk. Tunggu beberapa detik lalu klik cek lagi." });
            }
         }
       }
 
-      // --- BATALKAN PESANAN (CANCEL & REFUND) ---
+      // --- BATALKAN PESANAN ---
       if (data === "batal_pesanan") {
         const activeOrder = await dbGet(`active_orders/${chatId}`);
-        if (!activeOrder) return sendTelegram("sendMessage", { chat_id: chatId, text: "Tidak ada pesanan aktif." });
+        if (!activeOrder) {
+          await sendTelegram("sendMessage", { chat_id: chatId, text: "Tidak ada pesanan aktif." });
+          return res.status(200).send('OK');
+        }
 
         const fbRes = await fastbitApi(`/virtual-number/orders/${activeOrder.order_uuid}/cancel`);
 
         if (fbRes.success) {
-          // Kembalikan saldo (Refund)
+          // Refund saldo
           user.saldo += activeOrder.price;
           await dbPut(`users/${chatId}`, user);
           
-          // Hapus dari active_orders
+          // Hapus dari antrean database
           await dbDelete(`active_orders/${chatId}`);
 
           await sendTelegram("sendMessage", { chat_id: chatId, text: "✅ Pesanan berhasil dibatalkan. Saldo telah dikembalikan utuh ke akun kamu." });
         } else {
-          await sendTelegram("sendMessage", { chat_id: chatId, text: `❌ Gagal membatalkan: ${fbRes.message || "Tunggu minimal 3 menit setelah order sebelum membatalkan."}` });
+          await sendTelegram("sendMessage", { chat_id: chatId, text: `❌ Gagal membatalkan: ${fbRes.message || "Pastikan sudah lewat 3 menit setelah order sebelum membatalkan."}` });
         }
       }
     }
 
   } catch (error) {
-    console.error("Error:", error);
+    console.error("Error Sistem:", error);
   }
 
-  // Vercel Serverless wajib mengembalikan respon HTTP 200 agar webhook tidak di-retry terus oleh Telegram
+  // Wajib kirim HTTP 200 OK ke Telegram agar tidak loop/nyangkut
   return res.status(200).send('OK');
 }
