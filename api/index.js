@@ -1,16 +1,11 @@
 export default async function handler(req, res) {
-  // Hanya menerima metode POST dari webhook Telegram
   if (req.method !== 'POST') return res.status(200).send('OK');
 
   const { body } = req;
   const TELEGRAM_TOKEN = process.env.TELEGRAM_TOKEN;
   const FASTBIT_API_KEY = process.env.FASTBIT_API_KEY; 
-  // Gunakan ENV jika ada, jika tidak gunakan fallback link ini
   const FIREBASE_URL = process.env.FIREBASE_URL || "https://db-kind-otp-default-rtdb.asia-southeast1.firebasedatabase.app";
 
-  // ==========================================
-  // FUNGSI HELPER
-  // ==========================================
   const sendTelegram = async (method, data) => {
     return fetch(`https://api.telegram.org/bot${TELEGRAM_TOKEN}/${method}`, {
       method: "POST",
@@ -23,7 +18,6 @@ export default async function handler(req, res) {
     const response = await fetch(`${FIREBASE_URL}/${path}.json`);
     return response.json();
   };
-
   const dbPut = async (path, data) => {
     await fetch(`${FIREBASE_URL}/${path}.json`, {
       method: "PUT",
@@ -31,29 +25,30 @@ export default async function handler(req, res) {
       body: JSON.stringify(data)
     });
   };
-
   const dbDelete = async (path) => {
     await fetch(`${FIREBASE_URL}/${path}.json`, { method: "DELETE" });
   };
 
+  // VERSI ANTI CRASH FASTBIT
   const fastbitApi = async (endpoint) => {
     const response = await fetch(`https://fastbit.co.id/api${endpoint}`, {
       headers: { "X-API-KEY": FASTBIT_API_KEY }
     });
-    return response.json();
+    const textData = await response.text(); // Baca sebagai teks dulu
+    try {
+      return JSON.parse(textData); // Coba ubah ke JSON
+    } catch (e) {
+      throw new Error(`Respon Fastbit bukan JSON! Isinya: ${textData.substring(0, 50)}...`);
+    }
   };
 
   try {
-    // ==========================================
-    // 1. PENANGANAN PESAN TEKS (COMMAND)
-    // ==========================================
     if (body.message && body.message.text) {
       const chatId = body.message.chat.id;
       const text = body.message.text;
       const username = body.message.chat.username || body.message.chat.first_name || "User";
 
       if (text === "/start") {
-        // Cek/Buat Data User di Database
         let user = await dbGet(`users/${chatId}`);
         if (!user) {
           user = { username: username, saldo: 0 };
@@ -76,48 +71,43 @@ export default async function handler(req, res) {
       }
     }
 
-    // ==========================================
-    // 2. PENANGANAN TOMBOL (CALLBACK QUERY)
-    // ==========================================
     if (body.callback_query) {
       const chatId = body.callback_query.message.chat.id;
       const messageId = body.callback_query.message.message_id;
       const data = body.callback_query.data;
       const callbackId = body.callback_query.id;
 
-      // Jawab callback agar loading di tombol Telegram hilang
       await sendTelegram("answerCallbackQuery", { callback_query_id: callbackId });
 
-      // Ambil data user terkini
       let user = await dbGet(`users/${chatId}`);
       if (!user) {
         user = { username: "User", saldo: 0 };
         await dbPut(`users/${chatId}`, user);
       }
+      
+      // Amankan jika saldo error / belum ada
+      const userSaldo = Number(user.saldo) || 0;
 
-      // --- MENU PROFIL ---
       if (data === "menu_profil") {
         await sendTelegram("editMessageText", {
           chat_id: chatId,
           message_id: messageId,
-          text: `<b>👤 PROFIL AKUN</b>\n\n🆔 ID: <code>${chatId}</code>\n👤 Nama: ${user.username}\n💰 Saldo: <b>Rp ${user.saldo.toLocaleString("id-ID")}</b>`,
+          text: `<b>👤 PROFIL AKUN</b>\n\n🆔 ID: <code>${chatId}</code>\n👤 Nama: ${user.username}\n💰 Saldo: <b>Rp ${userSaldo.toLocaleString("id-ID")}</b>`,
           parse_mode: "HTML",
           reply_markup: { inline_keyboard: [[{ text: "🔙 Kembali", callback_data: "menu_utama" }]] }
         });
       }
 
-      // --- MENU DEPOSIT ---
       if (data === "menu_deposit") {
         await sendTelegram("editMessageText", {
           chat_id: chatId,
           message_id: messageId,
-          text: `<b>💰 ISI SALDO</b>\n\nUntuk mengisi saldo, silakan hubungi Admin di @KontakAdminZione\n\n<i>Sistem otomatis deposit QRIS sedang dalam pengembangan.</i>`,
+          text: `<b>💰 ISI SALDO</b>\n\nUntuk mengisi saldo, silakan hubungi Admin di @yoshuayoss\n\n<i>Sistem otomatis deposit QRIS sedang dalam pengembangan.</i>`,
           parse_mode: "HTML",
           reply_markup: { inline_keyboard: [[{ text: "🔙 Kembali", callback_data: "menu_utama" }]] }
         });
       }
 
-      // --- KEMBALI KE MENU UTAMA ---
       if (data === "menu_utama") {
         await sendTelegram("editMessageText", {
           chat_id: chatId,
@@ -133,7 +123,6 @@ export default async function handler(req, res) {
         });
       }
 
-      // --- MENU BELI (AMBIL LAYANAN DARI FASTBIT) ---
       if (data === "menu_beli") {
         const activeOrder = await dbGet(`active_orders/${chatId}`);
         if (activeOrder) {
@@ -146,17 +135,14 @@ export default async function handler(req, res) {
           return res.status(200).send('OK');
         }
 
-        // Tampilkan pesan loading sementara
         await sendTelegram("sendMessage", { chat_id: chatId, text: "⏳ Mengambil daftar layanan dari server..." });
 
         const fbServices = await fastbitApi("/services");
         
-        if (fbServices.status === "success") {
-          // Ambil 15 layanan populer teratas agar tidak error (limit tombol Telegram)
+        if (fbServices.status === "success" && Array.isArray(fbServices.data)) {
           const listLayanan = fbServices.data.slice(0, 15); 
           
           const rows = listLayanan.map(item => {
-            // Membatasi panjang nama aplikasi untuk callback data agar tidak melebihi 64 bytes
             const safeName = item.text.substring(0, 15);
             return [{ text: `${item.text}`, callback_data: `list_country_${item.id}_${safeName}` }];
           });
@@ -165,16 +151,15 @@ export default async function handler(req, res) {
 
           await sendTelegram("sendMessage", {
             chat_id: chatId,
-            text: `<b>🛒 PILIH APLIKASI</b>\n\nSaldo Anda: Rp ${user.saldo.toLocaleString("id-ID")}\nPilih aplikasi yang diinginkan:`,
+            text: `<b>🛒 PILIH APLIKASI</b>\n\nSaldo Anda: Rp ${userSaldo.toLocaleString("id-ID")}\nPilih aplikasi yang diinginkan:`,
             parse_mode: "HTML",
             reply_markup: { inline_keyboard: rows }
           });
         } else {
-          await sendTelegram("sendMessage", { chat_id: chatId, text: "❌ Gagal mengambil daftar layanan. Coba lagi nanti." });
+          await sendTelegram("sendMessage", { chat_id: chatId, text: `❌ Gagal mengambil daftar layanan. Status API: ${fbServices.status || "Unknown"}` });
         }
       }
 
-      // --- MENU PILIH NEGARA ---
       if (data.startsWith("list_country_")) {
         const parts = data.split("_");
         const appId = parts[2];
@@ -184,9 +169,8 @@ export default async function handler(req, res) {
 
         const fbCountries = await fastbitApi(`/services/countries?application_id=${appId}`);
         
-        if (fbCountries.status === "success") {
-          // Ambil 10 negara teratas yang punya stok
-          const availableCountries = fbCountries.countries.filter(c => c.stock > 0).slice(0, 10);
+        if (fbCountries.status === "success" && Array.isArray(fbCountries.countries)) {
+          const availableCountries = fbCountries.countries.filter(c => Number(c.stock) > 0).slice(0, 10);
 
           if (availableCountries.length === 0) {
             await sendTelegram("sendMessage", { chat_id: chatId, text: `❌ Maaf, stok nomor untuk aplikasi ${appName} sedang kosong di semua negara.` });
@@ -213,14 +197,13 @@ export default async function handler(req, res) {
         }
       }
 
-      // --- EKSEKUSI PEMBELIAN (ORDER KE FASTBIT) ---
       if (data.startsWith("buy_")) {
         const parts = data.split("_");
-        const serviceId = parts[1]; // Ini adalah otp_service_id
+        const serviceId = parts[1]; 
         const price = parseInt(parts[2]);
         const serviceName = parts[3];
 
-        if (user.saldo < price) {
+        if (userSaldo < price) {
           await sendTelegram("sendMessage", { chat_id: chatId, text: "❌ Saldo kamu tidak mencukupi untuk membeli layanan ini." });
           return res.status(200).send('OK');
         }
@@ -233,11 +216,9 @@ export default async function handler(req, res) {
           const orderUuid = fbRes.data.results[0].order_uuid;
           const number = fbRes.data.results[0].number || "Menunggu Nomor..."; 
 
-          // Potong Saldo User
-          user.saldo -= price;
+          user.saldo = userSaldo - price;
           await dbPut(`users/${chatId}`, user);
 
-          // Simpan ke database (pesanan aktif)
           await dbPut(`active_orders/${chatId}`, {
             order_uuid: orderUuid,
             service_name: serviceName,
@@ -263,7 +244,6 @@ export default async function handler(req, res) {
         }
       }
 
-      // --- CEK OTP MASUK ---
       if (data === "cek_pesanan") {
         const activeOrder = await dbGet(`active_orders/${chatId}`);
         if (!activeOrder) {
@@ -279,10 +259,7 @@ export default async function handler(req, res) {
            if (smsList && smsList.length > 0) {
              const kodeOtp = smsList[0]; 
              
-             // Kirim status "Selesai" ke Fastbit
              await fastbitApi(`/virtual-number/orders/${activeOrder.order_uuid}/finish`);
-             
-             // Hapus dari database antrean
              await dbDelete(`active_orders/${chatId}`);
 
              await sendTelegram("sendMessage", {
@@ -296,7 +273,6 @@ export default async function handler(req, res) {
         }
       }
 
-      // --- BATALKAN PESANAN ---
       if (data === "batal_pesanan") {
         const activeOrder = await dbGet(`active_orders/${chatId}`);
         if (!activeOrder) {
@@ -307,11 +283,8 @@ export default async function handler(req, res) {
         const fbRes = await fastbitApi(`/virtual-number/orders/${activeOrder.order_uuid}/cancel`);
 
         if (fbRes.success) {
-          // Refund saldo
-          user.saldo += activeOrder.price;
+          user.saldo = userSaldo + activeOrder.price;
           await dbPut(`users/${chatId}`, user);
-          
-          // Hapus dari antrean database
           await dbDelete(`active_orders/${chatId}`);
 
           await sendTelegram("sendMessage", { chat_id: chatId, text: "✅ Pesanan berhasil dibatalkan. Saldo telah dikembalikan utuh ke akun kamu." });
@@ -323,8 +296,17 @@ export default async function handler(req, res) {
 
   } catch (error) {
     console.error("Error Sistem:", error);
+    
+    // --- FITUR BUG TRACKER (Kirim laporan error langsung ke Telegram) ---
+    const targetChatId = body?.callback_query?.message?.chat?.id || body?.message?.chat?.id;
+    if (targetChatId) {
+      await sendTelegram("sendMessage", { 
+        chat_id: targetChatId, 
+        text: `🚨 <b>SISTEM CRASH DETECTED!</b>\n\nPesan Error:\n<code>${error.message}</code>\n\nLaporkan ini ke Developer.`, 
+        parse_mode: "HTML" 
+      });
+    }
   }
 
-  // Wajib kirim HTTP 200 OK ke Telegram agar tidak loop/nyangkut
   return res.status(200).send('OK');
 }
