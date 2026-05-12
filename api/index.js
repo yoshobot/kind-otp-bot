@@ -42,15 +42,11 @@ export default async function handler(req, res) {
   };
 
   try {
-    // ==========================================
-    // 1. PENANGANAN PESAN TEKS (COMMAND)
-    // ==========================================
     if (body.message && body.message.text) {
       const chatId = body.message.chat.id;
       const text = body.message.text;
       const username = body.message.chat.username || body.message.chat.first_name || "User";
 
-      // --- MENU UTAMA ---
       if (text === "/start") {
         let user = await dbGet(`users/${chatId}`);
         if (!user) {
@@ -73,34 +69,8 @@ export default async function handler(req, res) {
         });
         return res.status(200).send('OK');
       }
-
-      // --- FITUR RAHASIA ADMIN: CARI ID APLIKASI ---
-      if (text.startsWith("/cari ")) {
-        const keyword = text.split("/cari ")[1].toLowerCase();
-        await sendTelegram("sendMessage", { chat_id: chatId, text: `⏳ Mencari ID aplikasi untuk: <b>${keyword}</b>...`, parse_mode: "HTML" });
-        
-        const fbServices = await fastbitApi("/services");
-        if (fbServices.status === "success" && Array.isArray(fbServices.data)) {
-          const found = fbServices.data.filter(s => s.text.toLowerCase().includes(keyword)).slice(0, 10);
-          
-          if (found.length > 0) {
-            let msg = `🔎 <b>Hasil Pencarian Fastbit:</b>\n\n`;
-            found.forEach(f => { msg += `ID: <code>${f.id}</code> - Nama: ${f.text}\n` });
-            msg += `\n<i>Copy ID di atas dan masukkan ke dalam kode index.js kamu.</i>`;
-            await sendTelegram("sendMessage", { chat_id: chatId, text: msg, parse_mode: "HTML" });
-          } else {
-            await sendTelegram("sendMessage", { chat_id: chatId, text: `❌ Aplikasi "${keyword}" tidak ditemukan di Fastbit.` });
-          }
-        } else {
-          await sendTelegram("sendMessage", { chat_id: chatId, text: "❌ Gagal koneksi ke database Fastbit." });
-        }
-        return res.status(200).send('OK');
-      }
     }
 
-    // ==========================================
-    // 2. PENANGANAN TOMBOL (CALLBACK QUERY)
-    // ==========================================
     if (body.callback_query) {
       const chatId = body.callback_query.message.chat.id;
       const messageId = body.callback_query.message.message_id;
@@ -151,7 +121,7 @@ export default async function handler(req, res) {
         });
       }
 
-      // --- RENCANA B: MENU LAYANAN INSTAN (ANTI LEMOT & TIMEOUT) ---
+      // --- RENCANA B: DAFTAR APLIKASI FAVORIT ---
       if (data === "menu_beli") {
         const activeOrder = await dbGet(`active_orders/${chatId}`);
         if (activeOrder) {
@@ -164,12 +134,12 @@ export default async function handler(req, res) {
           return res.status(200).send('OK');
         }
 
-        // KUMPULAN LAYANAN FAVORIT (Bisa kamu edit ID-nya nanti)
+        // DATABASE ID APLIKASI FASTBIT
         const layananFavorit = [
-          { id: "100", name: "WhatsApp" }, // <-- Ganti 100 dengan ID Asli WA
-          { id: "101", name: "Telegram" }, // <-- Ganti 101 dengan ID Asli TG
-          { id: "786", name: "Instagram" }, // Ini ID asli dari screenshot kamu
-          { id: "544", name: "Facebook" }   // Ini ID asli dari screenshot kamu
+          { id: "1213", name: "WhatsApp" }, // <-- Menggunakan asumsi ID 1213 dari dokumen Fastbit!
+          { id: "1224", name: "Telegram" }, // <-- Ini tebakan, tolong cari ID aslinya di browser nanti!
+          { id: "786", name: "Instagram" }, // Sesuai dokumentasi
+          { id: "544", name: "Facebook" }   // Sesuai dokumentasi
         ];
 
         const rows = layananFavorit.map(item => {
@@ -186,13 +156,15 @@ export default async function handler(req, res) {
         });
       }
 
+      // --- MENCARI NEGARA (SESUAI GAMBAR 2: Get Countries) ---
       if (data.startsWith("list_country_")) {
         const parts = data.split("_");
         const appId = parts[2];
         const appName = parts[3];
         
-        await sendTelegram("sendMessage", { chat_id: chatId, text: `⏳ Mencari negara dan harga untuk ${appName}...` });
+        await sendTelegram("sendMessage", { chat_id: chatId, text: `⏳ Mencari negara & harga untuk ${appName}...` });
 
+        // Tembak endpoint Get Countries
         const fbCountries = await fastbitApi(`/services/countries?application_id=${appId}`);
         
         if (fbCountries.status === "success" && Array.isArray(fbCountries.countries)) {
@@ -206,7 +178,7 @@ export default async function handler(req, res) {
           const rows = availableCountries.map(c => {
             return [{ 
               text: `${c.name} (${c.price_formatted}) - Stok: ${c.stock}`, 
-              callback_data: `buy_${c.id}_${c.price}_${appName}` 
+              callback_data: `buy_${c.id}_${c.price}_${appName}` // c.id di sini adalah otp_service_id!
             }];
           });
 
@@ -219,13 +191,14 @@ export default async function handler(req, res) {
             reply_markup: { inline_keyboard: rows }
           });
         } else {
-          await sendTelegram("sendMessage", { chat_id: chatId, text: `❌ Gagal mengambil data negara atau ID Aplikasi salah.` });
+          await sendTelegram("sendMessage", { chat_id: chatId, text: `❌ Gagal mengambil data negara. (Mungkin ID Aplikasi ${appId} salah/tidak valid di server Fastbit).` });
         }
       }
 
+      // --- EKSEKUSI PEMBELIAN (SESUAI GAMBAR 5: Generate Order) ---
       if (data.startsWith("buy_")) {
         const parts = data.split("_");
-        const serviceId = parts[1]; 
+        const otpServiceId = parts[1]; 
         const price = parseInt(parts[2]);
         const serviceName = parts[3];
 
@@ -236,7 +209,7 @@ export default async function handler(req, res) {
 
         await sendTelegram("sendMessage", { chat_id: chatId, text: "⏳ Memproses pembelian nomor ke Fastbit..." });
 
-        const fbRes = await fastbitApi(`/virtual-number/generate-order-v2?otp_service_id=${serviceId}&quantity=1`);
+        const fbRes = await fastbitApi(`/virtual-number/generate-order-v2?otp_service_id=${otpServiceId}&quantity=1`);
         
         if (fbRes.success) {
           const orderUuid = fbRes.data.results[0].order_uuid;
@@ -270,6 +243,7 @@ export default async function handler(req, res) {
         }
       }
 
+      // --- CEK OTP MASUK (SESUAI GAMBAR 6: Get Order Details) ---
       if (data === "cek_pesanan") {
         const activeOrder = await dbGet(`active_orders/${chatId}`);
         if (!activeOrder) {
@@ -285,6 +259,7 @@ export default async function handler(req, res) {
            if (smsList && smsList.length > 0) {
              const kodeOtp = smsList[0]; 
              
+             // SESUAI GAMBAR 8: Finish Order
              await fastbitApi(`/virtual-number/orders/${activeOrder.order_uuid}/finish`);
              await dbDelete(`active_orders/${chatId}`);
 
@@ -296,9 +271,12 @@ export default async function handler(req, res) {
            } else {
              await sendTelegram("sendMessage", { chat_id: chatId, text: "⏳ Belum ada SMS/OTP yang masuk. Tunggu beberapa detik lalu klik cek lagi." });
            }
+        } else {
+           await sendTelegram("sendMessage", { chat_id: chatId, text: "⏳ Sedang memproses ke server Fastbit, silahkan klik cek lagi..." });
         }
       }
 
+      // --- BATALKAN PESANAN (SESUAI GAMBAR 7: Cancel Order) ---
       if (data === "batal_pesanan") {
         const activeOrder = await dbGet(`active_orders/${chatId}`);
         if (!activeOrder) {
